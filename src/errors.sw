@@ -1,7 +1,7 @@
 library;
 
 // Errors
-pub enum Error{
+pub enum Error {
     // Generic error
-    GenericError:  (),
+    GenericError: (),
 }
