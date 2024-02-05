@@ -5,7 +5,7 @@ abi Multisig {
     #[storage(read, write)]
     fn constructor(threshold: u8, owners_list: Vec<Identity>);
     #[storage(read, write)]
-    fn propose_tx(to: Identity, tx: Transaction);
+    fn propose_tx(tx: Transaction);
     #[storage(read, write)]
     fn approve_tx(tx_id: TxId);
     #[storage(read, write)]
@@ -31,7 +31,7 @@ abi Multisig {
     #[storage(read)]
     fn get_active_tx_ids() -> Vec<TxId>;
     #[storage(read)]
-    fn get_tx(tx_id: TxId) -> Transaction;
+    fn get_tx(tx_id: TxId) -> Option<Transaction>;
     #[storage(read)]
     fn get_tx_approval_by_owner(tx_id: TxId, owner: Identity) -> Option<bool>;
     #[storage(read)]

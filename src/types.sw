@@ -8,5 +8,6 @@ const MAX_OWNERS: u8 = 10;
 const MAX_TRANSACTIONS: u8 = 10;
 
 pub struct Transaction {
-    data: u64,// TODO: this is just for testing. Change this to the actual data type
+    to: Identity,
+    data: u64, // TODO: this is just for testing. Change this to the actual data type
 }
