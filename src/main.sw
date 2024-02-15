@@ -9,7 +9,10 @@ use interface::Multisig;
 use errors::Error;
 use std::storage::storage_vec::*;
 use std::hash::Hash;
+use std::call_frames::contract_id;
 
+const MAX_OWNERS: u64 = 10; // TODO: Set a reasonable limit
+const MAX_TXS: u64 = 10; // TODO: Set a reasonable limit
 storage {
     /// List of Owners of the multisig wallet.
     owners_list: StorageVec<Identity> = StorageVec {},
@@ -34,21 +37,21 @@ storage {
 impl Multisig for Contract {
     #[storage(read, write)]
     fn constructor(threshold: u8, owners_list: Vec<Identity>) {
-        if threshold == 0 {
-            revert(0); //TODO: add custom error
-        }
+        // Check that the threshold is not 0, otherwise revert
+        require(threshold != 0, Error::ThresholdCannotBeZero);
 
         let owners_count = owners_list.len();
+    
+        // Check that the owners list is not empty, otherwise revert
+        require(owners_count > 0, Error::OwnersCannotBeEmpty);
 
-        if threshold.as_u64() > owners_count {
-            revert(0); //TODO: add custom error
-        }
+        // Check that the threshold is not greater than the owners count, otherwise revert
+        require(owners_count >= threshold.as_u64(), Error::ThresholdCannotBeGreaterThanOwners);
 
-        if owners_count == 0 {
-            revert(0); //TODO: add custom error
-        }
+        // Check owners limit and revert if it has been reached
+        require(owners_count <= MAX_OWNERS, Error::MaxOwnersReached);
 
-        //TODO: Add upper limit for owners_count
+        // Add the owners
         let mut i = 0;
         while i < owners_count {
             //TODO: Make this more efficient. Try insert is not working. https://github.com/FuelLabs/sway/blob/491a07fa5d298c78cf28a9a89db327cdf6fd5e69/sway-lib-std/src/storage/storage_map.sw#L180
@@ -58,16 +61,16 @@ impl Multisig for Contract {
             //     revert(0); //TODO: add custom error
             // }
             let owner = storage.owners.get(owners_list.get(i).unwrap()).try_read();
-            if owner.is_some() {
-                revert(0); //TODO: add custom error
-            }
-            storage.owners.insert(owners_list.get(i).unwrap(), ());
+            require(owner.is_none(), Error::DuplicatedOwner);
             
+            storage.owners.insert(owners_list.get(i).unwrap(), ());
+
             i += 1;
         }
-
-        storage.threshold.write(threshold);
         storage.owners_list.store_vec(owners_list);
+
+        // Set the threshold
+        storage.threshold.write(threshold);
     }
 
     #[storage(read, write)]
@@ -78,6 +81,8 @@ impl Multisig for Contract {
         // Get the next transaction id and increment the nonce
         let tx_id = storage.next_tx_id.read();
         storage.next_tx_id.write(tx_id + 1);
+
+        //TODO: Check that the tx is valid
 
         // Store the transaction
         storage.tx_ids_list.push(tx_id);
@@ -141,14 +146,12 @@ impl Multisig for Contract {
         let approvals_count = storage.approvals_count.get(tx_id).read();
 
         // If the tx has been approved by the required number of owners, execute it, otherwise revert
-        if (approvals_count < threshold) {
-            revert(0); //TODO: add custom error
-        }
-
-        // TODO: execute the transaction
-
+        require(approvals_count >= threshold, Error::ThresholdNotReached);
+       
         // Remove the transaction from active transactions
         _remove_tx(tx_id);
+
+        // TODO: execute the transaction
 
         // TODO: emit event
     }
@@ -168,33 +171,57 @@ impl Multisig for Contract {
         let owners_count = storage.owners_list.len();
 
         // If the rejections are greater than the owners - threshold, the threshold can't be reached, so remove the transaction. Otherwise, revert
-        if (rejections_count.as_u64() < (owners_count - threshold.as_u64())) {
-            revert(0); //TODO: add custom error
-        }
-
+        require(rejections_count.as_u64() >= (owners_count - threshold.as_u64()), Error::ThresholdStillReachable);
+      
         // Remove the transaction from active transactions
         _remove_tx(tx_id);
     }
 
     #[storage(read, write)]
-    fn add_owner(owner: Identity) {}
+    fn add_owner(owner: Identity) {
+        check_self_call();
+
+        // Check owners limit and revert if it has been reached
+        require(storage.owners_list.len() < MAX_OWNERS, Error::MaxOwnersReached);
+
+        // Check that the owner is not already in the list, otherwise revert
+        let owner_exists = storage.owners.get(owner).try_read();
+        require(owner_exists.is_none(), Error::AlreadyOwner);
+      
+        // Add the owner
+        storage.owners.insert(owner, ());
+        storage.owners_list.push(owner);
+
+        //TODO: emit event
+    }
 
     #[storage(read, write)]
-    fn remove_owner(owner: Identity) {}
+    fn remove_owner(owner: Identity) {
+        check_self_call();
+
+        // Check that the owner is already in the list, otherwise revert
+        let owner_exists = storage.owners.get(owner).try_read();
+        require(owner_exists.is_some(), Error::NotOwner);
+
+        // Remove the owner
+       _remove_owner(owner);
+        
+        //TODO: emit event
+
+    }
 
     #[storage(read, write)]
     fn change_threshold(threshold: u8) {
+        check_self_call();
 
-        //TODO: check self call
-        // if (threshold.as_u64() > storage.owners_list.len()) {
-        //     revert(0); //TODO: add custom error
-        // }
+        // Check that the threshold is not greater than the owners count, otherwise revert
+        require(threshold.as_u64() <= storage.owners_list.len(), Error::ThresholdCannotBeGreaterThanOwners);
 
-        // if threshold == 0 {
-        //     revert(0); //TODO: add custom error
-        // }
+        // Check that the threshold is not 0, otherwise revert
+        require(threshold != 0, Error::ThresholdCannotBeZero);
 
-        // storage.threshold.write(threshold);
+        // Change the threshold
+        storage.threshold.write(threshold);
 
         //TODO: emit event
     }
@@ -267,6 +294,23 @@ fn _remove_tx(tx_id: TxId) {
     storage.rejections_count.remove(tx_id);
 }
 
+#[storage(read, write)]
+fn _remove_owner(owner: Identity) {
+    // Remove the owner from the mapping
+    storage.owners.remove(owner);
+
+    // Remove the owner from the list
+    let owners_list = storage.owners_list.load_vec();
+    let mut i = 0;
+    while i < owners_list.len() {
+        if owners_list.get(i).unwrap() == owner {
+            storage.owners_list.remove(i);
+            break;
+        }
+        i += 1;
+    }
+}
+
 #[storage(read)]
 fn get_caller_if_owner() -> Identity {
     let caller = match msg_sender() {
@@ -274,30 +318,38 @@ fn get_caller_if_owner() -> Identity {
         Err(_) => revert(0),
     };
 
-    if (storage.owners.get(caller).try_read().is_none()) {
-        revert(0); //TODO: add custom error
-    }
+    // Check if the caller is an owner, otherwise revert
+    require(storage.owners.get(caller).try_read().is_some(), Error::NotOwner);
 
     caller
 }
 
 #[storage(read)]
 fn check_tx_id_validity(tx_id: TxId) {
-    if (storage.txs.get(tx_id).try_read().is_none()) {
-        revert(0); //TODO: add custom error
-    }
+    require(storage.txs.get(tx_id).try_read().is_some(), Error::InvalidTxId);
 }
 
 #[storage(read)]
 fn check_if_already_voted(tx_id: TxId, owner: Identity) {
     // TxId is not checked here because it is already checked in the approve_tx and reject_tx functions
-    if (storage.approvals.get(tx_id).get(owner).try_read().is_some()) {
-        revert(0); //TODO: add custom error
-    }
+    require(storage.approvals.get(tx_id).get(owner).try_read().is_none(), Error::AlreadyVoted);
+}
+
+fn check_self_call() {
+    let caller = match msg_sender() {
+        Ok(caller) => caller,
+        Err(_) => revert(0),
+    };
+
+    let is_self_call = match caller {
+        Identity::ContractId(caller_contract_id) => caller_contract_id == contract_id(),
+        _ => false,
+    };
+    require(is_self_call, Error::Unauthorized);
 }
 
 #[test]
 fn test_success() {
     let caller = abi(Multisig, CONTRACT_ID);
-    let result = caller.change_threshold {}(2);
+    let result = caller.change_threshold {    }(2);
 }
