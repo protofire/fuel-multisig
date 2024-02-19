@@ -179,7 +179,8 @@ impl Multisig for Contract {
 
     #[storage(read, write)]
     fn add_owner(owner: Identity) {
-        check_self_call();
+        // This is disabled just for the sake of the demo
+        // check_self_call();
 
         // Check owners limit and revert if it has been reached
         require(storage.owners_list.len() < MAX_OWNERS, Error::MaxOwnersReached);
@@ -197,7 +198,8 @@ impl Multisig for Contract {
 
     #[storage(read, write)]
     fn remove_owner(owner: Identity) {
-        check_self_call();
+        // This is disabled just for the sake of the demo
+        // check_self_call();
 
         // Check that the owner is already in the list, otherwise revert
         let owner_exists = storage.owners.get(owner).try_read();
@@ -212,7 +214,8 @@ impl Multisig for Contract {
 
     #[storage(read, write)]
     fn change_threshold(threshold: u8) {
-        check_self_call();
+        // This is disabled just for the sake of the demo
+        // check_self_call();
 
         // Check that the threshold is not greater than the owners count, otherwise revert
         require(threshold.as_u64() <= storage.owners_list.len(), Error::ThresholdCannotBeGreaterThanOwners);
