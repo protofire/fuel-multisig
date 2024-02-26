@@ -37,6 +37,9 @@ storage {
 impl Multisig for Contract {
     #[storage(read, write)]
     fn constructor(threshold: u8, owners_list: Vec<Identity>) {
+        // Check that the multisig wallet has not been initialized yet, otherwise revert
+        require(storage.threshold.read() == 0, Error::AlreadyInitialized);
+
         // Check that the threshold is not 0, otherwise revert
         require(threshold != 0, Error::ThresholdCannotBeZero);
 
@@ -75,6 +78,9 @@ impl Multisig for Contract {
 
     #[storage(read, write)]
     fn propose_tx(tx: Transaction) {
+        // Check that the multisig wallet has been initialized, otherwise revert
+        require(storage.threshold.read() != 0, Error::NotInitialized);
+
         // Get the caller if it is an owner. If not, revert.
         let caller = get_caller_if_owner();
 
@@ -98,6 +104,9 @@ impl Multisig for Contract {
 
     #[storage(read, write)]
     fn approve_tx(tx_id: TxId) {
+        // Check that the multisig wallet has been initialized, otherwise revert
+        require(storage.threshold.read() != 0, Error::NotInitialized);
+
         // Check that the tx_id is valid, otherwise revert
         check_tx_id_validity(tx_id);
 
@@ -117,6 +126,9 @@ impl Multisig for Contract {
 
     #[storage(read, write)]
     fn reject_tx(tx_id: TxId) {
+        // Check that the multisig wallet has been initialized, otherwise revert
+        require(storage.threshold.read() != 0, Error::NotInitialized);
+
         // Check that the tx_id is valid, otherwise revert
         check_tx_id_validity(tx_id);
 
@@ -136,6 +148,9 @@ impl Multisig for Contract {
 
     #[storage(read, write)]
     fn execute_tx(tx_id: TxId) {
+        // Check that the multisig wallet has been initialized, otherwise revert
+        require(storage.threshold.read() != 0, Error::NotInitialized);
+
         // Check that the tx_id is valid, otherwise revert
         check_tx_id_validity(tx_id);
 
@@ -158,6 +173,9 @@ impl Multisig for Contract {
 
     #[storage(read, write)]
     fn remove_tx(tx_id: TxId) {
+        // Check that the multisig wallet has been initialized, otherwise revert
+        require(storage.threshold.read() != 0, Error::NotInitialized);
+
         // Check that the tx_id is valid, otherwise revert
         check_tx_id_validity(tx_id);
 
@@ -179,6 +197,9 @@ impl Multisig for Contract {
 
     #[storage(read, write)]
     fn add_owner(owner: Identity) {
+        // Check that the multisig wallet has been initialized, otherwise revert
+        require(storage.threshold.read() != 0, Error::NotInitialized);
+
         // This is disabled just for the sake of the demo
         // check_self_call();
 
@@ -198,6 +219,9 @@ impl Multisig for Contract {
 
     #[storage(read, write)]
     fn remove_owner(owner: Identity) {
+        // Check that the multisig wallet has been initialized, otherwise revert
+        require(storage.threshold.read() != 0, Error::NotInitialized);
+
         // This is disabled just for the sake of the demo
         // check_self_call();
 
@@ -214,6 +238,9 @@ impl Multisig for Contract {
 
     #[storage(read, write)]
     fn change_threshold(threshold: u8) {
+        // Check that the multisig wallet has been initialized, otherwise revert
+        require(storage.threshold.read() != 0, Error::NotInitialized);
+
         // This is disabled just for the sake of the demo
         // check_self_call();
 

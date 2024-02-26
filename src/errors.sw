@@ -28,4 +28,8 @@ pub enum Error {
     InvalidTxId: (),
     /// The transaction can only be executed by the multisig contract itself
     Unauthorized: (),
+    /// The multisig contract is not initialized
+    NotInitialized: (),
+    /// The multisig contract is already initialized
+    AlreadyInitialized: (),
 }
