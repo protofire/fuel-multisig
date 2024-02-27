@@ -1,7 +1,2 @@
-[project]
-authors = ["Luca Auet"]
-entry = "main.sw"
-license = "Apache-2.0"
-name = "fuel-multisig"
-
-[dependencies]
+[workspace]
+members = ["./multisig-contract", "./tests/utils/test-contracts/counter"]

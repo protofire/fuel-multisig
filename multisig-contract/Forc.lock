@@ -3,11 +3,6 @@ name = "core"
 source = "path+from-root-B672DC9E3D340CD2"
 
 [[package]]
-name = "counter"
-source = "member"
-dependencies = ["std"]
-
-[[package]]
 name = "fuel-multisig"
 source = "member"
 dependencies = ["std"]

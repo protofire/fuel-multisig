@@ -1,18 +1,31 @@
 contract;
 
+mod events;
 mod types;
 mod interface;
 mod errors;
 
 use types::*;
 use interface::Multisig;
-use errors::Error;
-use std::storage::storage_vec::*;
-use std::hash::Hash;
-use std::call_frames::contract_id;
+use errors::MultisigError;
+use events::*;
+use std::{
+    asset::transfer,
+    call_frames::contract_id,
+    context::this_balance,
+    hash::Hash,
+    low_level_call::{
+        call_with_function_selector,
+        CallParams,
+    },
+    storage::storage_vec::*,
+    storage::storage_bytes::*
+};
+use std::bytes::Bytes;
 
 const MAX_OWNERS: u64 = 10; // TODO: Set a reasonable limit
 const MAX_TXS: u64 = 10; // TODO: Set a reasonable limit
+
 storage {
     /// List of Owners of the multisig wallet.
     owners_list: StorageVec<Identity> = StorageVec {},
@@ -26,6 +39,11 @@ storage {
     tx_ids_list: StorageVec<TxId> = StorageVec {},
     /// The transactions that are currently active.
     txs: StorageMap<TxId, Transaction> = StorageMap {},
+    // TODO: This is a workaround. We should use the calldata and function_selector from ContractCallParams directly instead of storing them in a separate storage key
+    /// The calldata of the transactions that are currently active.(Optional)
+    txs_calldata: StorageMap<TxId, StorageBytes> = StorageMap {},
+    /// The function selector of the transactions that are currently active.(Optional)
+    txs_function_selector: StorageMap<TxId, StorageBytes> = StorageMap {},
     /// Mapping of approvals to check which owner has approved or rejected a transaction.
     approvals: StorageMap<TxId, StorageMap<Identity, bool>> = StorageMap::<TxId, StorageMap<Identity, bool>> {},
     /// Mapping of approvals count to check how many approvals a transaction has
@@ -38,21 +56,25 @@ impl Multisig for Contract {
     #[storage(read, write)]
     fn constructor(threshold: u8, owners_list: Vec<Identity>) {
         // Check that the multisig wallet has not been initialized yet, otherwise revert
-        require(storage.threshold.read() == 0, Error::AlreadyInitialized);
+        require(storage.threshold.read() == 0, MultisigError::AlreadyInitialized);
 
         // Check that the threshold is not 0, otherwise revert
-        require(threshold != 0, Error::ThresholdCannotBeZero);
+        require(threshold != 0, MultisigError::ThresholdCannotBeZero);
 
         let owners_count = owners_list.len();
-    
+
         // Check that the owners list is not empty, otherwise revert
-        require(owners_count > 0, Error::OwnersCannotBeEmpty);
+        require(owners_count > 0, MultisigError::OwnersCannotBeEmpty);
 
         // Check that the threshold is not greater than the owners count, otherwise revert
-        require(owners_count >= threshold.as_u64(), Error::ThresholdCannotBeGreaterThanOwners);
+        require(
+            owners_count >= threshold
+                .as_u64(),
+            MultisigError::ThresholdCannotBeGreaterThanOwners,
+        );
 
         // Check owners limit and revert if it has been reached
-        require(owners_count <= MAX_OWNERS, Error::MaxOwnersReached);
+        require(owners_count <= MAX_OWNERS, MultisigError::MaxOwnersReached);
 
         // Add the owners
         let mut i = 0;
@@ -64,8 +86,8 @@ impl Multisig for Contract {
             //     revert(0); //TODO: add custom error
             // }
             let owner = storage.owners.get(owners_list.get(i).unwrap()).try_read();
-            require(owner.is_none(), Error::DuplicatedOwner);
-            
+            require(owner.is_none(), MultisigError::DuplicatedOwner);
+
             storage.owners.insert(owners_list.get(i).unwrap(), ());
 
             i += 1;
@@ -74,12 +96,20 @@ impl Multisig for Contract {
 
         // Set the threshold
         storage.threshold.write(threshold);
+
+        // Emit event
+        log(MultisigInitialized {
+            contract_id: contract_id(),
+            threshold: threshold,
+            owners: owners_list,
+        });
     }
 
     #[storage(read, write)]
-    fn propose_tx(tx: Transaction) {
+    fn propose_tx(to: Identity, tx_parameters: TransactionParameters) -> TxId{
+        //TODO: Check if StorageBytes in tx_parameters can be sent, or if we need to change the type to Bytes and then convert it to StorageBytes in here
         // Check that the multisig wallet has been initialized, otherwise revert
-        require(storage.threshold.read() != 0, Error::NotInitialized);
+        require(storage.threshold.read() != 0, MultisigError::NotInitialized);
 
         // Get the caller if it is an owner. If not, revert.
         let caller = get_caller_if_owner();
@@ -92,20 +122,53 @@ impl Multisig for Contract {
 
         // Store the transaction
         storage.tx_ids_list.push(tx_id);
-        storage.txs.insert(tx_id, tx);
+
+        // TODO: This is a workaround. We should use the calldata and function_selector from ContractCallParams directly instead of storing them in a separate storage key
+        let internal_tx_parameters = match tx_parameters {
+            TransactionParameters::Call(contract_call_params) => {
+               
+                let calldata = storage.txs_calldata.get(tx_id);
+                calldata.write_slice(contract_call_params.calldata);
+
+                let function_selector = storage.txs_function_selector.get(tx_id);
+                function_selector.write_slice(contract_call_params.function_selector);
+
+                InternalTransactionParameters::Call(InternalContractCallParams {
+                    forwarded_gas: contract_call_params.forwarded_gas,
+                    single_value_type_arg: contract_call_params.single_value_type_arg,
+                    transfer_params: contract_call_params.transfer_params,
+                })
+            },
+            TransactionParameters::Transfer(transfer_params) => {
+                InternalTransactionParameters::Transfer(transfer_params)
+            },
+        };
+
+        storage
+            .txs
+            .insert(
+                tx_id,
+                Transaction {
+                    tx_id,
+                    to,
+                    tx_parameters: internal_tx_parameters,
+                },
+            );
 
         // Initialize the approvals and rejections count
         storage.approvals_count.insert(tx_id, 1);
         storage.rejections_count.insert(tx_id, 0);
         storage.approvals.get(tx_id).insert(caller, true);
 
-        //TODO: emit event
+        // Emit event
+        log(TransactionProposed { tx_id: tx_id, to: to, transaction_parameters: tx_parameters});
+        tx_id
     }
 
     #[storage(read, write)]
     fn approve_tx(tx_id: TxId) {
         // Check that the multisig wallet has been initialized, otherwise revert
-        require(storage.threshold.read() != 0, Error::NotInitialized);
+        require(storage.threshold.read() != 0, MultisigError::NotInitialized);
 
         // Check that the tx_id is valid, otherwise revert
         check_tx_id_validity(tx_id);
@@ -121,13 +184,14 @@ impl Multisig for Contract {
 
         storage.approvals.get(tx_id).insert(caller, true);
 
-        //TODO: emit event
+        // Emit event
+        log(TransactionApproved { tx_id: tx_id, owner: caller });
     }
 
     #[storage(read, write)]
     fn reject_tx(tx_id: TxId) {
         // Check that the multisig wallet has been initialized, otherwise revert
-        require(storage.threshold.read() != 0, Error::NotInitialized);
+        require(storage.threshold.read() != 0, MultisigError::NotInitialized);
 
         // Check that the tx_id is valid, otherwise revert
         check_tx_id_validity(tx_id);
@@ -143,13 +207,14 @@ impl Multisig for Contract {
 
         storage.approvals.get(tx_id).insert(caller, false);
 
-        //TODO: emit event
+        // Emit event
+        log(TransactionRejected { tx_id: tx_id, owner: caller });
     }
 
     #[storage(read, write)]
     fn execute_tx(tx_id: TxId) {
         // Check that the multisig wallet has been initialized, otherwise revert
-        require(storage.threshold.read() != 0, Error::NotInitialized);
+        require(storage.threshold.read() != 0, MultisigError::NotInitialized);
 
         // Check that the tx_id is valid, otherwise revert
         check_tx_id_validity(tx_id);
@@ -161,20 +226,26 @@ impl Multisig for Contract {
         let approvals_count = storage.approvals_count.get(tx_id).read();
 
         // If the tx has been approved by the required number of owners, execute it, otherwise revert
-        require(approvals_count >= threshold, Error::ThresholdNotReached);
-       
+        require(approvals_count >= threshold, MultisigError::ThresholdNotReached);
+
+        // Get the transaction from the storage.
+        let transaction = storage.txs.get(tx_id).try_read().unwrap();
+
         // Remove the transaction from active transactions
         _remove_tx(tx_id);
 
-        // TODO: execute the transaction
+        // Execute the transaction
+        _execute_tx(transaction);
 
-        // TODO: emit event
+        //TODO: Check if we can analyze the result of the execution and log this in the event
+        // Emit event
+        log(TransactionExecuted { tx_id: tx_id });
     }
 
     #[storage(read, write)]
     fn remove_tx(tx_id: TxId) {
         // Check that the multisig wallet has been initialized, otherwise revert
-        require(storage.threshold.read() != 0, Error::NotInitialized);
+        require(storage.threshold.read() != 0, MultisigError::NotInitialized);
 
         // Check that the tx_id is valid, otherwise revert
         check_tx_id_validity(tx_id);
@@ -189,68 +260,89 @@ impl Multisig for Contract {
         let owners_count = storage.owners_list.len();
 
         // If the rejections are greater than the owners - threshold, the threshold can't be reached, so remove the transaction. Otherwise, revert
-        require(rejections_count.as_u64() >= (owners_count - threshold.as_u64()), Error::ThresholdStillReachable);
-      
+        require(
+            rejections_count
+                .as_u64() >= (owners_count - threshold
+                    .as_u64()),
+            MultisigError::ThresholdStillReachable,
+        );
+
         // Remove the transaction from active transactions
         _remove_tx(tx_id);
+
+        // Emit event
+        log(TransactionCancelled { tx_id: tx_id });
     }
 
     #[storage(read, write)]
     fn add_owner(owner: Identity) {
         // Check that the multisig wallet has been initialized, otherwise revert
-        require(storage.threshold.read() != 0, Error::NotInitialized);
+        require(storage.threshold.read() != 0, MultisigError::NotInitialized);
 
         check_self_call();
 
         // Check owners limit and revert if it has been reached
-        require(storage.owners_list.len() < MAX_OWNERS, Error::MaxOwnersReached);
+        require(
+            storage
+                .owners_list
+                .len() < MAX_OWNERS,
+            MultisigError::MaxOwnersReached,
+        );
 
         // Check that the owner is not already in the list, otherwise revert
         let owner_exists = storage.owners.get(owner).try_read();
-        require(owner_exists.is_none(), Error::AlreadyOwner);
-      
+        require(owner_exists.is_none(), MultisigError::AlreadyOwner);
+
         // Add the owner
         storage.owners.insert(owner, ());
         storage.owners_list.push(owner);
 
-        //TODO: emit event
+        // Emit event
+        log(OwnerAdded { owner: owner });
     }
 
     #[storage(read, write)]
     fn remove_owner(owner: Identity) {
         // Check that the multisig wallet has been initialized, otherwise revert
-        require(storage.threshold.read() != 0, Error::NotInitialized);
+        require(storage.threshold.read() != 0, MultisigError::NotInitialized);
 
         check_self_call();
 
         // Check that the owner is already in the list, otherwise revert
         let owner_exists = storage.owners.get(owner).try_read();
-        require(owner_exists.is_some(), Error::NotOwner);
+        require(owner_exists.is_some(), MultisigError::NotOwner);
 
         // Remove the owner
-       _remove_owner(owner);
-        
-        //TODO: emit event
+        _remove_owner(owner);
 
+        // Emit event
+        log(OwnerRemoved { owner: owner });
     }
 
     #[storage(read, write)]
     fn change_threshold(threshold: u8) {
         // Check that the multisig wallet has been initialized, otherwise revert
-        require(storage.threshold.read() != 0, Error::NotInitialized);
-        
+        require(storage.threshold.read() != 0, MultisigError::NotInitialized);
+
         check_self_call();
 
         // Check that the threshold is not greater than the owners count, otherwise revert
-        require(threshold.as_u64() <= storage.owners_list.len(), Error::ThresholdCannotBeGreaterThanOwners);
+        require(
+            threshold
+                .as_u64() <= storage
+                .owners_list
+                .len(),
+            MultisigError::ThresholdCannotBeGreaterThanOwners,
+        );
 
         // Check that the threshold is not 0, otherwise revert
-        require(threshold != 0, Error::ThresholdCannotBeZero);
+        require(threshold != 0, MultisigError::ThresholdCannotBeZero);
 
         // Change the threshold
         storage.threshold.write(threshold);
 
-        //TODO: emit event
+        // Emit event
+        log(ThresholdChanged { new_threshold: threshold });
     }
 
     #[storage(read)]
@@ -281,6 +373,16 @@ impl Multisig for Contract {
     #[storage(read)]
     fn get_tx(tx_id: TxId) -> Option<Transaction> {
         storage.txs.get(tx_id).try_read()
+    }
+
+    #[storage(read)]
+    fn get_tx_calldata(tx_id: TxId) -> Option<Bytes> {
+        storage.txs_calldata.get(tx_id).read_slice()
+    }
+
+    #[storage(read)]
+    fn get_tx_function_selector(tx_id: TxId) -> Option<Bytes> {
+        storage.txs_function_selector.get(tx_id).read_slice()
     }
 
     #[storage(read)]
@@ -316,9 +418,14 @@ fn _remove_tx(tx_id: TxId) {
     }
 
     storage.txs.remove(tx_id);
+    storage.txs_calldata.remove(tx_id);
+    storage.txs_function_selector.remove(tx_id);
     storage.approvals.remove(tx_id);
     storage.approvals_count.remove(tx_id);
     storage.rejections_count.remove(tx_id);
+
+    // Emit event
+    log(TransactionRemoved { tx_id: tx_id });
 }
 
 #[storage(read, write)]
@@ -338,6 +445,68 @@ fn _remove_owner(owner: Identity) {
     }
 }
 
+#[storage(read, write)]
+fn _execute_tx(transaction: Transaction) { 
+    // Check if it is a call or a transfer and execute it.
+    match transaction.tx_parameters {
+        InternalTransactionParameters::Call(contract_call_params) => {
+            let target_contract_id = match transaction.to {
+                Identity::ContractId(contract_identifier) => contract_identifier,
+                _ => {
+                    // TODO: Add custom error
+                    revert(0);
+                },
+            };
+
+            if contract_call_params.transfer_params.value.is_some() {
+                require(
+                    contract_call_params
+                        .transfer_params
+                        .value
+                        .unwrap() <= this_balance(contract_call_params.transfer_params.asset_id),
+                    MultisigError::InsufficientAssetAmount,
+                );
+            }
+
+            let call_params = CallParams {
+                coins: contract_call_params.transfer_params.value.unwrap_or(0),
+                asset_id: contract_call_params.transfer_params.asset_id,
+                gas: contract_call_params.forwarded_gas,
+            };
+
+            // TODO: This is a workaround. We should use the calldata and function_selector from ContractCallParams directly instead of storing them in a separate storage key
+            let function_selector = storage.txs_function_selector.get(transaction.tx_id).read_slice().unwrap();
+            let calldata = storage.txs_calldata.get(transaction.tx_id).read_slice().unwrap();
+          
+            // TODO: Check if we can analyze the result of the execution
+            call_with_function_selector(
+                target_contract_id,
+                function_selector,
+                calldata,
+                contract_call_params
+                    .single_value_type_arg,
+                call_params,
+            );
+        },
+        InternalTransactionParameters::Transfer(transfer_params) => {
+            require(
+                transfer_params
+                    .value
+                    .is_some(),
+                MultisigError::TransferRequiresAValue,
+            );
+            let value = transfer_params.value.unwrap();
+            require(
+                value <= this_balance(transfer_params.asset_id),
+                MultisigError::InsufficientAssetAmount,
+            );
+
+            transfer(transaction.to, transfer_params.asset_id, value);
+            //TODO: emit event
+        },
+    }
+}
+
 #[storage(read)]
 fn get_caller_if_owner() -> Identity {
     let caller = match msg_sender() {
@@ -346,20 +515,42 @@ fn get_caller_if_owner() -> Identity {
     };
 
     // Check if the caller is an owner, otherwise revert
-    require(storage.owners.get(caller).try_read().is_some(), Error::NotOwner);
+    require(
+        storage
+            .owners
+            .get(caller)
+            .try_read()
+            .is_some(),
+        MultisigError::NotOwner,
+    );
 
     caller
 }
 
 #[storage(read)]
 fn check_tx_id_validity(tx_id: TxId) {
-    require(storage.txs.get(tx_id).try_read().is_some(), Error::InvalidTxId);
+    require(
+        storage
+            .txs
+            .get(tx_id)
+            .try_read()
+            .is_some(),
+        MultisigError::InvalidTxId,
+    );
 }
 
 #[storage(read)]
 fn check_if_already_voted(tx_id: TxId, owner: Identity) {
     // TxId is not checked here because it is already checked in the approve_tx and reject_tx functions
-    require(storage.approvals.get(tx_id).get(owner).try_read().is_none(), Error::AlreadyVoted);
+    require(
+        storage
+            .approvals
+            .get(tx_id)
+            .get(owner)
+            .try_read()
+            .is_none(),
+        MultisigError::AlreadyVoted,
+    );
 }
 
 fn check_self_call() {
@@ -372,7 +563,7 @@ fn check_self_call() {
         Identity::ContractId(caller_contract_id) => caller_contract_id == contract_id(),
         _ => false,
     };
-    require(is_self_call, Error::Unauthorized);
+    require(is_self_call, MultisigError::Unauthorized);
 }
 
 #[test]

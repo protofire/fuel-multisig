@@ -1,7 +1,7 @@
 library;
 
 // Errors
-pub enum Error {
+pub enum MultisigError {
     // Generic error
     GenericError: (),
     /// Maximum number of owners reached
@@ -32,4 +32,10 @@ pub enum Error {
     NotInitialized: (),
     /// The multisig contract is already initialized
     AlreadyInitialized: (),
+    /// The multisig does not have enough funds
+    InsufficientAssetAmount: (),
+    /// Only contracts can be called
+    CanOnlyCallContracts: (),
+    /// Transfer requires a value to be sent
+    TransferRequiresAValue: (),
 }
